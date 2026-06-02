@@ -61,7 +61,7 @@ python3 dx_grab.py --preset NAME [--output DIR] [--limit N] [--dry-run]
 
 ## Duplicate filenames
 
-If multiple matched files share the same filename, you can use `--dedupe` to keep only the most recently modified one.
+If multiple matched files share the same filename, you can use `--dedupe` to keep only the most recently created one.
 
 ## Presets
 

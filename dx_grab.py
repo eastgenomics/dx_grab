@@ -155,7 +155,7 @@ Examples:
     parser.add_argument(
         "--dedupe",
         action="store_true",
-        help="De-duplicate by filename (global), keeping the most recently modified file.",
+        help="De-duplicate by filename (global), keeping the most recently created file.",
     )
     args = parser.parse_args()
 
@@ -303,9 +303,9 @@ def find_files(dxpy, projects, name_pattern, folder_pattern, emit_json=False):
 
 
 def dedupe_by_name_keep_newest(files):
-    """De-duplicate by filename (case-insensitive), keeping most recently modified.
+    """De-duplicate by filename (case-insensitive), keeping most recently created.
 
-    Uses 'modified' when available, falling back to 'created'. Tie-breakers:
+    Uses 'created' when available, falling back to 'modified'. Tie-breakers:
     prefer live files, then stable ordering by file_id.
     """
     best = {}
@@ -316,8 +316,8 @@ def dedupe_by_name_keep_newest(files):
             best[key] = f
             continue
 
-        f_ts = f.get("modified") or f.get("created") or 0
-        cur_ts = cur.get("modified") or cur.get("created") or 0
+        f_ts = f.get("created") or f.get("modified") or 0
+        cur_ts = cur.get("created") or cur.get("modified") or 0
 
         if f_ts > cur_ts:
             best[key] = f
