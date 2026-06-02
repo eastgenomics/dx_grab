@@ -23,7 +23,6 @@ This module is also importable as dx_grab. Public API:
 """
 
 import argparse
-import argparse
 import fnmatch
 import json
 import os
@@ -153,6 +152,11 @@ Examples:
         action="store_true",
         help="Print a JSON summary of matched/downloaded files to stdout instead of human-readable output.",
     )
+    parser.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="De-duplicate by filename (global), keeping the most recently modified file.",
+    )
     args = parser.parse_args()
 
     if args.preset:
@@ -281,6 +285,8 @@ def find_files(dxpy, projects, name_pattern, folder_pattern):
                     "folder": folder,
                     "size": desc.get("size", 0),
                     "archival_state": desc.get("archivalState", "live"),
+                    "created": desc.get("created", 0),
+                    "modified": desc.get("modified", 0),
                 })
         except dxpy.exceptions.PermissionDenied:
             print(f"  WARNING: Permission denied for project {proj_name} ({proj_id}), skipping.",
@@ -290,6 +296,43 @@ def find_files(dxpy, projects, name_pattern, folder_pattern):
                   file=sys.stderr)
 
     return results
+
+
+def dedupe_by_name_keep_newest(files):
+    """De-duplicate by filename (case-insensitive), keeping most recently modified.
+
+    Uses 'modified' when available, falling back to 'created'. Tie-breakers:
+    prefer live files, then stable ordering by file_id.
+    """
+    best = {}
+    for f in files:
+        key = f["name"].lower()
+        cur = best.get(key)
+        if cur is None:
+            best[key] = f
+            continue
+
+        f_ts = f.get("modified") or f.get("created") or 0
+        cur_ts = cur.get("modified") or cur.get("created") or 0
+
+        if f_ts > cur_ts:
+            best[key] = f
+            continue
+        if f_ts < cur_ts:
+            continue
+
+        f_live = 1 if f.get("archival_state") == "live" else 0
+        cur_live = 1 if cur.get("archival_state") == "live" else 0
+        if f_live > cur_live:
+            best[key] = f
+            continue
+        if f_live < cur_live:
+            continue
+
+        if str(f.get("file_id", "")) > str(cur.get("file_id", "")):
+            best[key] = f
+
+    return list(best.values())
 
 
 def print_table(files, emit_json=False):
@@ -582,6 +625,7 @@ def resolve_project(dxpy, project_arg):
 def main():
     """Entry point: find and download files, handling archives interactively."""
     args = parse_args()
+
     try:
         dxpy = check_auth()
 
@@ -600,7 +644,16 @@ def main():
             ]
             excluded = before - len(files)
             if excluded:
-                print(f"Excluded {excluded} file(s) matching: {', '.join(args.exclude)}")
+                _log(f"Excluded {excluded} file(s) matching: {', '.join(args.exclude)}", emit_json=args.json)
+
+        if args.dedupe:
+            before_dedup = len(files)
+            files = dedupe_by_name_keep_newest(files)
+            if len(files) != before_dedup:
+                _log(
+                    f"De-duplicated by filename: kept {len(files)} newest of {before_dedup} matched file(s).",
+                    emit_json=args.json,
+                )
 
         if not files:
             print("\nNo matching files found.")

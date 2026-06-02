@@ -47,6 +47,7 @@ python3 dx_grab.py --preset NAME [--output DIR] [--limit N] [--dry-run]
 | `--skip-archived` | No | Automatically skip archived files without prompting |
 | `--skip-existing` | No | Skip files that already exist at the local destination path |
 | `--json` | No | Output matched/downloaded files as JSON instead of human-readable text |
+| `--dedupe` | No | De-duplicate by filename (global), keeping the most recently modified file |
 
 \* Required unless `--preset` is used.
 
@@ -57,6 +58,10 @@ python3 dx_grab.py --preset NAME [--output DIR] [--limit N] [--dry-run]
 | `0` | Success |
 | `1` | Error (bad arguments, auth failure, etc.) |
 | `2` | No matching files found |
+
+## Duplicate filenames
+
+If multiple matched files share the same filename, you can use `--dedupe` to keep only the most recently modified one.
 
 ## Presets
 
