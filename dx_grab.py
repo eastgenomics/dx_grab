@@ -316,8 +316,8 @@ def dedupe_by_name_keep_newest(files):
             best[key] = f
             continue
 
-        f_ts = f.get("created") or f.get("modified") or 0
-        cur_ts = cur.get("created") or cur.get("modified") or 0
+        f_ts = f["created"] or f["modified"] or 0
+        cur_ts = cur["created"] or cur["modified"] or 0
 
         if f_ts > cur_ts:
             best[key] = f
@@ -361,6 +361,8 @@ def print_table(files, emit_json=False):
             "name": f["name"],
             "size": f["size"],
             "archival_state": f["archival_state"],
+            "created": f["created"],
+            "modified": f["modified"],
         } for f in files]))
         return
 
@@ -667,6 +669,11 @@ def main():
                 _log(
                     f"De-duplicated by filename: kept {len(files)} newest of {before_dedup} matched file(s).",
                     emit_json=args.json,
+                )
+            else:
+                _log(
+                    "De-duplication enabled but no filename duplicates found.",
+                    emit_json=args.json
                 )
 
         if not files:
