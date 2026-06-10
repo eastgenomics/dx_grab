@@ -23,7 +23,6 @@ This module is also importable as dx_grab. Public API:
 """
 
 import argparse
-import argparse
 import fnmatch
 import json
 import os
@@ -153,6 +152,11 @@ Examples:
         action="store_true",
         help="Print a JSON summary of matched/downloaded files to stdout instead of human-readable output.",
     )
+    parser.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="De-duplicate by filename (global), keeping the most recently created file.",
+    )
     args = parser.parse_args()
 
     if args.preset:
@@ -220,36 +224,40 @@ def _glob_to_iregex(pattern):
     return "^" + "".join(parts) + "$"
 
 
-def find_projects(dxpy, pattern):
+def find_projects(dxpy, pattern, emit_json=False):
     """Return DNAnexus projects whose name matches pattern.
 
     Print matching projects to stdout. Raises ValueError if none are found.
     When pattern is None, return all accessible projects.
     """
     if pattern:
-        print(f"\nSearching for projects matching: {pattern!r}")
+        _log(f"\nSearching for projects matching: {pattern!r}", emit_json)
         projects = list(dxpy.find_projects(describe=True, name=_glob_to_iregex(pattern), name_mode="regexp"))
     else:
-        print("\nSearching all accessible projects...")
+        _log("\nSearching all accessible projects...", emit_json)
         projects = list(dxpy.find_projects(describe=True))
     if not projects:
         msg = f"No projects found matching {pattern!r}." if pattern else "No accessible projects found."
         raise ValueError(msg)
-    print(f"Found {len(projects)} project(s):")
+    _log(f"Found {len(projects)} project(s):", emit_json)
     for p in projects:
-        print(f"  {p['describe']['name']}  ({p['id']})")
+        _log(f"  {p['describe']['name']}  ({p['id']})", emit_json)
     return projects
 
 
-def find_files(dxpy, projects, name_pattern, folder_pattern):
+def find_files(dxpy, projects, name_pattern, folder_pattern, emit_json=False):
     """Return files matching name_pattern across the given projects.
 
     name_pattern is a glob converted to a case-insensitive regex.
     folder_pattern is an optional glob; only files in matching folders
     are returned. Skips projects the caller lacks permission to access.
     """
-    print(f"\nSearching for files matching name={name_pattern!r}"
-          + (f", folder={folder_pattern!r}" if folder_pattern else "") + " ...")
+    _log(
+        f"\nSearching for files matching name={name_pattern!r}"
+        + (f", folder={folder_pattern!r}" if folder_pattern else "")
+        + " ...",
+        emit_json,
+    )
 
     results = []
     for proj in projects:
@@ -281,6 +289,8 @@ def find_files(dxpy, projects, name_pattern, folder_pattern):
                     "folder": folder,
                     "size": desc.get("size", 0),
                     "archival_state": desc.get("archivalState", "live"),
+                    "created": desc.get("created", 0),
+                    "modified": desc.get("modified", 0),
                 })
         except dxpy.exceptions.PermissionDenied:
             print(f"  WARNING: Permission denied for project {proj_name} ({proj_id}), skipping.",
@@ -292,6 +302,43 @@ def find_files(dxpy, projects, name_pattern, folder_pattern):
     return results
 
 
+def dedupe_by_name_keep_newest(files):
+    """De-duplicate by filename (case-insensitive), keeping most recently created.
+
+    Uses 'created' when available, falling back to 'modified'. Tie-breakers:
+    prefer live files, then stable ordering by file_id.
+    """
+    best = {}
+    for f in files:
+        key = f["name"].lower()
+        cur = best.get(key)
+        if cur is None:
+            best[key] = f
+            continue
+
+        f_ts = f["created"] or f["modified"] or 0
+        cur_ts = cur["created"] or cur["modified"] or 0
+
+        if f_ts > cur_ts:
+            best[key] = f
+            continue
+        if f_ts < cur_ts:
+            continue
+
+        f_live = 1 if f.get("archival_state") == "live" else 0
+        cur_live = 1 if cur.get("archival_state") == "live" else 0
+        if f_live > cur_live:
+            best[key] = f
+            continue
+        if f_live < cur_live:
+            continue
+
+        if str(f.get("file_id", "")) > str(cur.get("file_id", "")):
+            best[key] = f
+
+    return list(best.values())
+
+
 def print_table(files, emit_json=False):
     """Print a formatted table of files, or a JSON array when emit_json is True.
 
@@ -299,7 +346,10 @@ def print_table(files, emit_json=False):
     array goes to stdout so it can be piped to other tools.
     """
     if not files:
-        print("No files found.")
+        if emit_json:
+            print("[]")
+        else:
+            print("No files found.")
         return
 
     if emit_json:
@@ -311,6 +361,8 @@ def print_table(files, emit_json=False):
             "name": f["name"],
             "size": f["size"],
             "archival_state": f["archival_state"],
+            "created": f["created"],
+            "modified": f["modified"],
         } for f in files]))
         return
 
@@ -334,7 +386,7 @@ def print_table(files, emit_json=False):
     print(f"\nTotal: {len(files)} file(s), {fmt_size(total)}")
 
 
-def handle_archives(dxpy, files, auto_yes=False, skip_archived=False, on_live=None):
+def handle_archives(dxpy, files, auto_yes=False, skip_archived=False, on_live=None, emit_json=False):
     """Prompt about archived files, unarchive if needed, and poll until live.
 
     Both 'archived' and 'archival' (archiving in progress) files require
@@ -362,39 +414,46 @@ def handle_archives(dxpy, files, auto_yes=False, skip_archived=False, on_live=No
             parts.append(f"{archived_count} archived")
         if archival_count:
             parts.append(f"{archival_count} currently being archived (unarchiving will cancel this)")
-        print(f"\n{len(needs_unarchive)} file(s) need unarchiving ({', '.join(parts)}):")
+        _log(f"\n{len(needs_unarchive)} file(s) need unarchiving ({', '.join(parts)}):", emit_json)
         for f in needs_unarchive:
-            print(f"  [{f['archival_state']}] {f['project_name']}{f['folder']}/{f['name']}  ({fmt_size(f['size'])})")
+            _log(
+                f"  [{f['archival_state']}] {f['project_name']}{f['folder']}/{f['name']}  ({fmt_size(f['size'])})",
+                emit_json,
+            )
 
         if skip_archived:
-            print("Skipping archived files (--skip-archived).")
+            _log("Skipping archived files (--skip-archived).", emit_json)
             files = [f for f in files if f["archival_state"] not in ("archived", "archival")]
         elif auto_yes:
-            print("Unarchiving automatically (--yes).")
-            submitted = _submit_unarchive(dxpy, needs_unarchive)
+            _log("Unarchiving automatically (--yes).", emit_json)
+            submitted = _submit_unarchive(dxpy, needs_unarchive, emit_json=emit_json)
             for f in needs_unarchive:
                 if f["file_id"] in submitted:
                     f["archival_state"] = "unarchiving"
                     unarchiving.append(f)
         else:
-            answer = input("\nUnarchive them? Unarchiving typically takes several hours. [y/N] ").strip().lower()
+            if emit_json:
+                _log("\nUnarchive them? Unarchiving typically takes several hours. [y/N]", emit_json=True)
+                answer = input().strip().lower()
+            else:
+                answer = input("\nUnarchive them? Unarchiving typically takes several hours. [y/N] ").strip().lower()
             if answer in ("y", "yes"):
-                submitted = _submit_unarchive(dxpy, needs_unarchive)
+                submitted = _submit_unarchive(dxpy, needs_unarchive, emit_json=emit_json)
                 for f in needs_unarchive:
                     if f["file_id"] in submitted:
                         f["archival_state"] = "unarchiving"
                         unarchiving.append(f)
             else:
-                print(f"Skipping {len(needs_unarchive)} file(s) (got: {answer!r}).")
+                _log(f"Skipping {len(needs_unarchive)} file(s) (got: {answer!r}).", emit_json)
                 files = [f for f in files if f["archival_state"] not in ("archived", "archival")]
 
     if unarchiving:
-        files = _poll_until_live(dxpy, files, unarchiving, on_live=on_live)
+        files = _poll_until_live(dxpy, files, unarchiving, on_live=on_live, emit_json=emit_json)
 
     return files
 
 
-def _submit_unarchive(dxpy, files):
+def _submit_unarchive(dxpy, files, emit_json=False):
     """Group files by project and submit unarchive requests (max 1000 per call).
 
     Returns the set of file IDs whose unarchive request was accepted.
@@ -413,11 +472,11 @@ def _submit_unarchive(dxpy, files):
             except Exception as e:
                 print(f"  WARNING: Unarchive request failed for {proj_id}: {e}", file=sys.stderr)
 
-    print(f"Unarchive requested for {len(submitted_ids)} of {len(files)} file(s).")
+    _log(f"Unarchive requested for {len(submitted_ids)} of {len(files)} file(s).", emit_json)
     return submitted_ids
 
 
-def _poll_until_live(dxpy, all_files, waiting, on_live=None):
+def _poll_until_live(dxpy, all_files, waiting, on_live=None, emit_json=False):
     """Poll every 10 minutes until all waiting files are live.
 
     Calls on_live(batch) with each batch of newly-live files as they appear,
@@ -428,8 +487,8 @@ def _poll_until_live(dxpy, all_files, waiting, on_live=None):
     total = len(waiting_ids)   # original batch size — denominator stays fixed
     done  = 0                  # cumulative count of files that have gone live
 
-    print(f"\nWaiting for {total} file(s) to unarchive (polling every 10 minutes).")
-    print("Press Ctrl+C to abort — re-run the same command to resume.\n")
+    _log(f"\nWaiting for {total} file(s) to unarchive (polling every 10 minutes).", emit_json)
+    _log("Press Ctrl+C to abort — re-run the same command to resume.\n", emit_json)
 
     try:
         while waiting_ids:
@@ -452,7 +511,7 @@ def _poll_until_live(dxpy, all_files, waiting, on_live=None):
                     still_waiting.add(fid)
 
             done += len(newly_live)
-            print(f"[{now}] Waiting for unarchive: {done}/{total} file(s) live ...")
+            _log(f"[{now}] Waiting for unarchive: {done}/{total} file(s) live ...", emit_json)
 
             if newly_live and on_live:
                 on_live(newly_live)
@@ -464,7 +523,7 @@ def _poll_until_live(dxpy, all_files, waiting, on_live=None):
             time.sleep(600)  # 10 minutes
 
     except KeyboardInterrupt:
-        print("\n\nUnarchiving in progress on DNAnexus. Re-run the same command to resume.")
+        _log("\n\nUnarchiving in progress on DNAnexus. Re-run the same command to resume.", emit_json)
         sys.exit(0)
 
     return all_files
@@ -582,6 +641,7 @@ def resolve_project(dxpy, project_arg):
 def main():
     """Entry point: find and download files, handling archives interactively."""
     args = parse_args()
+
     try:
         dxpy = check_auth()
 
@@ -589,8 +649,8 @@ def main():
             proj_id, proj_name = resolve_project(dxpy, args.project)
             projects = [{"id": proj_id, "describe": {"name": proj_name}}]
         else:
-            projects = find_projects(dxpy, args.project)
-        files = find_files(dxpy, projects, args.name, args.folder)
+            projects = find_projects(dxpy, args.project, emit_json=args.json)
+        files = find_files(dxpy, projects, args.name, args.folder, emit_json=args.json)
 
         if args.exclude:
             before = len(files)
@@ -600,10 +660,24 @@ def main():
             ]
             excluded = before - len(files)
             if excluded:
-                print(f"Excluded {excluded} file(s) matching: {', '.join(args.exclude)}")
+                _log(f"Excluded {excluded} file(s) matching: {', '.join(args.exclude)}", emit_json=args.json)
+
+        if args.dedupe:
+            before_dedup = len(files)
+            files = dedupe_by_name_keep_newest(files)
+            if len(files) != before_dedup:
+                _log(
+                    f"De-duplicated by filename: kept {len(files)} newest of {before_dedup} matched file(s).",
+                    emit_json=args.json,
+                )
+            else:
+                _log(
+                    "De-duplication enabled but no filename duplicates found.",
+                    emit_json=args.json
+                )
 
         if not files:
-            print("\nNo matching files found.")
+            _log("\nNo matching files found.", emit_json=args.json)
             sys.exit(2)
 
         print_table(files, emit_json=args.json)
@@ -615,8 +689,11 @@ def main():
             if args.limit < len(files):
                 # Sort live files first so the limit is filled without touching archived files
                 files = sorted(files, key=lambda f: 0 if f["archival_state"] == "live" else 1)
-                print(f"\nLimit set: downloading {args.limit} of {len(files)} matched file(s) "
-                      f"(live files preferred).")
+                _log(
+                    f"\nLimit set: downloading {args.limit} of {len(files)} matched file(s) "
+                    f"(live files preferred).",
+                    emit_json=args.json,
+                )
             files = files[:args.limit]
 
         # Resolve destination paths once across the full selection so collision
@@ -631,7 +708,14 @@ def main():
         if live:
             _download(live)
 
-        handle_archives(dxpy, files, auto_yes=args.yes, skip_archived=args.skip_archived, on_live=_download)
+        handle_archives(
+            dxpy,
+            files,
+            auto_yes=args.yes,
+            skip_archived=args.skip_archived,
+            on_live=_download,
+            emit_json=args.json,
+        )
 
     except (ValueError, RuntimeError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
